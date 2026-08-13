@@ -75,6 +75,13 @@ def extract_reddit(url, workdir):
     files = []
     for root, _dirs, fs in os.walk(workdir):
         for f in fs:
+            # Skip moviepy's intermediate temp artifacts from an interrupted
+            # merge (e.g. "mediaTEMP_MPY_wvf_snd.mp3") -- these are leftover
+            # pieces, not real output, and sending them alongside/instead of
+            # the actual merged file produces the "video and audio arrived
+            # as separate files" bug.
+            if "TEMP_MPY" in f:
+                continue
             files.append(os.path.join(root, f))
 
     items = [
