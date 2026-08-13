@@ -63,6 +63,19 @@ def _resolve_reddit_share_link(url):
     return url
 
 
+def _post_looks_like_video(post):
+    if post.get("is_video"):
+        return True
+    if (post.get("media") or {}).get("reddit_video"):
+        return True
+    if (post.get("secure_media") or {}).get("reddit_video"):
+        return True
+    url_field = (post.get("url") or "") + (post.get("url_overridden_by_dest") or "")
+    if "v.redd.it" in url_field:
+        return True
+    return False
+
+
 def is_confirmed_video(url):
     """Returns True only when we've positively confirmed this Reddit post is
     a video. Any failure or uncertainty returns False -- meaning "proceed
@@ -80,7 +93,18 @@ def is_confirmed_video(url):
             return False
         data = resp.json()
         post = data[0]["data"]["children"][0]["data"]
-        return bool(post.get("is_video"))
+
+        if _post_looks_like_video(post):
+            return True
+
+        # Crossposts: the outer post's is_video is often False even when the
+        # original content it's crossposting IS a video -- the real signal
+        # lives in the parent post's data.
+        for parent in post.get("crosspost_parent_list") or []:
+            if _post_looks_like_video(parent):
+                return True
+
+        return False
     except Exception:
         return False
 
