@@ -140,9 +140,14 @@ if BASE_URL:
     logger.info("setWebhook -> %s : %s", _webhook_url, _result)
 
 
-LOCAL_TIMEOUT_SECONDS = 45  # images/galleries finish well within this; slow
-                            # video encodes on Render's weak CPU won't, and
-                            # get killed and handed to GitHub instead.
+LOCAL_TIMEOUT_SECONDS = 8  # Render's own platform-level restart has been
+                           # observed firing around 13-14s into a heavy
+                           # video job (almost certainly a RAM kill, not
+                           # CPU -- os.nice() didn't help, confirming this).
+                           # Our own timeout needs to win that race and kill
+                           # gracefully first, or we lose the job with no
+                           # fallback at all. Images/galleries still finish
+                           # comfortably inside 8s.
 
 
 def _watch_and_fallback(proc, url, chat_id, message_id):
