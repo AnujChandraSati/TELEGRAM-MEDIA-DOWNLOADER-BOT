@@ -208,6 +208,14 @@ def webhook():
 
 
 def process_url(chat_id, url, message_id):
+    try:
+        os.nice(19)  # lowest priority -- never let this starve the main
+                     # process from responding to Render's health checks,
+                     # which was triggering a full service restart faster
+                     # than our own timeout could react.
+    except Exception:
+        pass
+
     workdir = f"/tmp/media/{uuid.uuid4().hex}"
     try:
         items, status = extract_media(url, workdir)
