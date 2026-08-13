@@ -89,23 +89,29 @@ def is_confirmed_video(url):
         resolved = _resolve_reddit_share_link(url)
         check_url = resolved if resolved.endswith(".json") else resolved.rstrip("/") + ".json"
         resp = requests.get(check_url, headers=BROWSER_HEADERS, timeout=10)
+        logger.info("is_confirmed_video: GET %s -> %s", check_url, resp.status_code)
         if resp.status_code != 200:
+            logger.info("is_confirmed_video: non-200 response, treating as unconfirmed")
             return False
         data = resp.json()
         post = data[0]["data"]["children"][0]["data"]
 
         if _post_looks_like_video(post):
+            logger.info("is_confirmed_video: confirmed video (top-level post)")
             return True
 
-        # Crossposts: the outer post's is_video is often False even when the
-        # original content it's crossposting IS a video -- the real signal
-        # lives in the parent post's data.
         for parent in post.get("crosspost_parent_list") or []:
             if _post_looks_like_video(parent):
+                logger.info("is_confirmed_video: confirmed video (crosspost parent)")
                 return True
 
+        logger.info(
+            "is_confirmed_video: not confirmed. is_video=%s post_hint=%s domain=%s url=%s",
+            post.get("is_video"), post.get("post_hint"), post.get("domain"), post.get("url"),
+        )
         return False
-    except Exception:
+    except Exception as e:
+        logger.info("is_confirmed_video: exception, treating as unconfirmed: %s", e)
         return False
 
 
