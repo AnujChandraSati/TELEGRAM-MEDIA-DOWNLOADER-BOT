@@ -49,6 +49,42 @@ def _headers_for_url(url):
     return headers
 
 
+def _resolve_reddit_share_link(url):
+    if "/s/" not in url:
+        return url
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, allow_redirects=True, timeout=15, stream=True)
+        resolved = resp.url
+        resp.close()
+        if resolved and resolved != url:
+            return resolved.split("?")[0]
+    except Exception:
+        pass
+    return url
+
+
+def is_confirmed_video(url):
+    """Returns True only when we've positively confirmed this Reddit post is
+    a video. Any failure or uncertainty returns False -- meaning "proceed
+    normally" (try locally first, same as any other URL) -- NOT "route to
+    GitHub". That inverted default is what broke everything last time: this
+    check should only ever ADD a shortcut for a confirmed case, never change
+    behavior when we simply don't know."""
+    if "reddit.com" not in url and "redd.it" not in url:
+        return False
+    try:
+        resolved = _resolve_reddit_share_link(url)
+        check_url = resolved if resolved.endswith(".json") else resolved.rstrip("/") + ".json"
+        resp = requests.get(check_url, headers=BROWSER_HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+        post = data[0]["data"]["children"][0]["data"]
+        return bool(post.get("is_video"))
+    except Exception:
+        return False
+
+
 URL_RE = re.compile(r"https?://\S+")
 
 _recently_seen = set()
@@ -161,6 +197,15 @@ def webhook():
         if not found:
             return jsonify(ok=True)
         text = found
+
+    if is_confirmed_video(text):
+        # Confirmed Reddit video -- Render's free-tier CPU (0.1 vCPU) makes
+        # local video encoding painfully slow, sometimes slow enough that
+        # the process misses health checks and gets restarted mid-job with
+        # nothing ever sent. Skip local entirely, go straight to a GitHub
+        # worker (2 vCPU), which handles this fine.
+        dispatch_to_github(text, chat_id, message_id)
+        return jsonify(ok=True)
 
     # Process in a background thread so we return 200 to Telegram immediately
     # (otherwise Telegram will retry the webhook on slow extractions).
