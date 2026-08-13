@@ -1,5 +1,6 @@
 import logging
 import mimetypes
+import multiprocessing
 import os
 import re
 import shutil
@@ -61,58 +62,6 @@ def _resolve_reddit_share_link(url):
     except Exception:
         pass
     return url
-
-
-def _post_looks_like_video(post):
-    if post.get("is_video"):
-        return True
-    if (post.get("media") or {}).get("reddit_video"):
-        return True
-    if (post.get("secure_media") or {}).get("reddit_video"):
-        return True
-    url_field = (post.get("url") or "") + (post.get("url_overridden_by_dest") or "")
-    if "v.redd.it" in url_field:
-        return True
-    return False
-
-
-def is_confirmed_video(url):
-    """Returns True only when we've positively confirmed this Reddit post is
-    a video. Any failure or uncertainty returns False -- meaning "proceed
-    normally" (try locally first, same as any other URL) -- NOT "route to
-    GitHub". That inverted default is what broke everything last time: this
-    check should only ever ADD a shortcut for a confirmed case, never change
-    behavior when we simply don't know."""
-    if "reddit.com" not in url and "redd.it" not in url:
-        return False
-    try:
-        resolved = _resolve_reddit_share_link(url)
-        check_url = resolved if resolved.endswith(".json") else resolved.rstrip("/") + ".json"
-        resp = requests.get(check_url, headers=BROWSER_HEADERS, timeout=10)
-        logger.info("is_confirmed_video: GET %s -> %s", check_url, resp.status_code)
-        if resp.status_code != 200:
-            logger.info("is_confirmed_video: non-200 response, treating as unconfirmed")
-            return False
-        data = resp.json()
-        post = data[0]["data"]["children"][0]["data"]
-
-        if _post_looks_like_video(post):
-            logger.info("is_confirmed_video: confirmed video (top-level post)")
-            return True
-
-        for parent in post.get("crosspost_parent_list") or []:
-            if _post_looks_like_video(parent):
-                logger.info("is_confirmed_video: confirmed video (crosspost parent)")
-                return True
-
-        logger.info(
-            "is_confirmed_video: not confirmed. is_video=%s post_hint=%s domain=%s url=%s",
-            post.get("is_video"), post.get("post_hint"), post.get("domain"), post.get("url"),
-        )
-        return False
-    except Exception as e:
-        logger.info("is_confirmed_video: exception, treating as unconfirmed: %s", e)
-        return False
 
 
 URL_RE = re.compile(r"https?://\S+")
@@ -191,6 +140,25 @@ if BASE_URL:
     logger.info("setWebhook -> %s : %s", _webhook_url, _result)
 
 
+LOCAL_TIMEOUT_SECONDS = 45  # images/galleries finish well within this; slow
+                            # video encodes on Render's weak CPU won't, and
+                            # get killed and handed to GitHub instead.
+
+
+def _watch_and_fallback(proc, url, chat_id, message_id):
+    proc.join(timeout=LOCAL_TIMEOUT_SECONDS)
+    if proc.is_alive():
+        logger.warning(
+            "Local processing exceeded %ss, killing and falling back to GitHub: %s",
+            LOCAL_TIMEOUT_SECONDS, url,
+        )
+        proc.terminate()
+        proc.join(5)
+        if proc.is_alive():
+            proc.kill()
+        dispatch_to_github(url, chat_id, message_id)
+
+
 @app.route("/", methods=["GET"])
 def health():
     # Ping this endpoint to keep the free-tier service awake.
@@ -228,18 +196,14 @@ def webhook():
             return jsonify(ok=True)
         text = found
 
-    if is_confirmed_video(text):
-        # Confirmed Reddit video -- Render's free-tier CPU (0.1 vCPU) makes
-        # local video encoding painfully slow, sometimes slow enough that
-        # the process misses health checks and gets restarted mid-job with
-        # nothing ever sent. Skip local entirely, go straight to a GitHub
-        # worker (2 vCPU), which handles this fine.
-        dispatch_to_github(text, chat_id, message_id)
-        return jsonify(ok=True)
-
-    # Process in a background thread so we return 200 to Telegram immediately
-    # (otherwise Telegram will retry the webhook on slow extractions).
-    threading.Thread(target=process_url, args=(chat_id, text, message_id), daemon=True).start()
+    # Run locally in a real (killable) subprocess, not just a thread -- a
+    # thread stuck in a slow video encode can't be forcibly stopped, but a
+    # subprocess can. A watcher thread joins with a timeout; if local
+    # processing is still running past that, it gets killed and the URL
+    # falls back to GitHub automatically. No upfront guessing required.
+    proc = multiprocessing.Process(target=process_url, args=(chat_id, text, message_id), daemon=True)
+    proc.start()
+    threading.Thread(target=_watch_and_fallback, args=(proc, text, chat_id, message_id), daemon=True).start()
     return jsonify(ok=True)
 
 
